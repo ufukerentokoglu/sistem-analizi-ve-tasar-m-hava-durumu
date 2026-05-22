@@ -1,0 +1,7 @@
+mysql-connector-python==8.4.0
+python-dotenv==1.0.1
+geocoder==1.38.1
+requests==2.32.3
+schedule==1.2.2
+matplotlib==3.9.2
+pyinstaller==6.10.0
