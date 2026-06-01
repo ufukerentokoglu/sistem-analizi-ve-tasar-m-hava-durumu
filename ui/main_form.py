@@ -35,11 +35,16 @@ class MainForm(tk.Tk):
                  location_service: LocationService,
                  risk_analyzer: Optional[RiskAnalyzer] = None,
                  notification_service: Optional[NotificationService] = None,
-                 scheduler: Optional[BackgroundScheduler] = None):
+                 scheduler: Optional[BackgroundScheduler] = None,
+                 kullanici_id: int = 1,
+                 konum_izni: bool = True):
         super().__init__()
         self.db = db
         self.weather_api = weather_api
         self.location_service = location_service
+        self.kullanici_id = kullanici_id
+        # KVKK reddedildiğinde False olur — "Konumumu Tespit Et" devre dışı tutulur
+        self.konum_izni = konum_izni
         self.aktif_konum: Optional[Location] = None
 
         # Aşama 7 servisleri — dışarıdan inject edilebilir, yoksa default oluşur
@@ -122,6 +127,7 @@ class MainForm(tk.Tk):
             sag, text="📍 Konumumu Tespit Et",
             style="Aksiyon.TButton",
             command=self.konumu_tespit_et,
+            state=("normal" if self.konum_izni else "disabled"),
         )
         self.btn_tespit.pack(side="left", padx=(0, 10))
 
@@ -152,13 +158,14 @@ class MainForm(tk.Tk):
         # Favoriler
         self.favorites_form = FavoritesForm(
             self.notebook, self.db, self.weather_api,
-            kullanici_id=1,
+            kullanici_id=self.kullanici_id,
             on_select=self._favoriden_yukle,
         )
         self.notebook.add(self.favorites_form, text="Favoriler")
 
         # Ayarlar (bildirim tercihleri)
-        self.settings_form = SettingsForm(self.notebook, self.db, kullanici_id=1)
+        self.settings_form = SettingsForm(self.notebook, self.db,
+                                          kullanici_id=self.kullanici_id)
         self.notebook.add(self.settings_form, text="Ayarlar")
 
     def _durum_cubugu_olustur(self, parent: tk.Widget) -> None:
@@ -167,10 +174,21 @@ class MainForm(tk.Tk):
         self.lbl_durum.pack(fill="x", pady=(8, 0))
 
     # ----- Etkileşim -----
+    def _btn_tespit_durumu(self, etkin: bool) -> None:
+        """Tespit butonunu KVKK iznine göre yönetir — izin yoksa hep disabled."""
+        if not self.konum_izni:
+            self.btn_tespit.config(state="disabled")
+            return
+        self.btn_tespit.config(state="normal" if etkin else "disabled")
+
     def konumu_tespit_et(self) -> None:
         """IP geolocation tetikler. Sonucu UI thread'e geri yansıtır."""
+        if not self.konum_izni:
+            self._durum_yaz("KVKK onayı verilmediği için IP konum tespiti devre dışı. "
+                            "Arama kutusundan şehir adıyla arayabilirsiniz.")
+            return
         self._durum_yaz("Konum tespit ediliyor…")
-        self.btn_tespit.config(state="disabled")
+        self._btn_tespit_durumu(False)
 
         def gorev():
             try:
@@ -253,7 +271,7 @@ class MainForm(tk.Tk):
 
         UI thread'inden çağrılır — API isteği için yine ayrı bir thread açılır.
         """
-        self.btn_tespit.config(state="disabled")
+        self._btn_tespit_durumu(False)
         self._durum_yaz(f"{loc.sehir} için hava durumu alınıyor…")
         self.aktif_konumu_guncelle(loc)
 
@@ -263,7 +281,7 @@ class MainForm(tk.Tk):
             except Exception as e:  # noqa: BLE001
                 logger.error("Hava durumu çekilirken hata: %s", e)
                 self.after(0, lambda: self._hata("API hatası", str(e)))
-                self.after(0, lambda: self.btn_tespit.config(state="normal"))
+                self.after(0, lambda: self._btn_tespit_durumu(True))
                 return
             # Çekilen veriye konum_id ata ve DB'ye yaz
             w.konum_id = loc.id or 0
@@ -282,7 +300,7 @@ class MainForm(tk.Tk):
         self.weather_display.veriyi_goster(loc, weather)
         self.notebook.select(0)  # "Anlık" sekmesini öne al
         self._durum_yaz(f"{loc.sehir} için veri güncellendi.")
-        self.btn_tespit.config(state="normal")
+        self._btn_tespit_durumu(True)
         # Favori listesi açıksa son sıcaklığı yansıt
         try:
             self.favorites_form.listeyi_yenile()
@@ -296,7 +314,7 @@ class MainForm(tk.Tk):
 
     def _hata(self, baslik: str, mesaj: str) -> None:
         self._durum_yaz(baslik)
-        self.btn_tespit.config(state="normal")
+        self._btn_tespit_durumu(True)
         messagebox.showerror(baslik, mesaj)
 
     # ----- Risk + arka plan -----
@@ -367,8 +385,8 @@ class MainForm(tk.Tk):
 
         # Kullanıcı + bildirim ayarı
         try:
-            user = self.db.kullanici_getir(1)
-            ayar = self.db.bildirim_ayari_getir(1)
+            user = self.db.kullanici_getir(self.kullanici_id)
+            ayar = self.db.bildirim_ayari_getir(self.kullanici_id)
         except Exception as e:
             logger.error("Kullanıcı/bildirim ayarı okunamadı: %s", e)
             user, ayar = None, None

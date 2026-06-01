@@ -7,10 +7,11 @@ CREATE DATABASE IF NOT EXISTS havadurumu
 
 USE havadurumu;
 
--- 1) Kullanicilar (tek kullanıcı modeli — id=1 sabit kayıt)
+-- 1) Kullanicilar (çok kullanıcılı — ad UNIQUE, ad+şifre ile giriş)
 CREATE TABLE IF NOT EXISTS Kullanicilar (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    ad VARCHAR(100) NOT NULL DEFAULT 'Kullanıcı',
+    ad VARCHAR(100) NOT NULL UNIQUE,
+    sifre_hash VARCHAR(255) NOT NULL,
     email VARCHAR(150),
     telefon VARCHAR(20),
     kvkk_onay BOOLEAN NOT NULL DEFAULT FALSE,
@@ -87,6 +88,5 @@ CREATE TABLE IF NOT EXISTS RiskliBolgeler (
     INDEX idx_aktif_riskler (konum_id, baslangic, bitis)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Seed: tek kullanıcı kaydı + default bildirim ayarı
-INSERT IGNORE INTO Kullanicilar (id, ad) VALUES (1, 'Kullanıcı');
-INSERT IGNORE INTO BildirimAyarlari (kullanici_id) VALUES (1);
+-- Çok kullanıcılı yapı: seed kaydı yok. Kullanıcılar kayıt formundan eklenir.
+-- BildirimAyarlari, yeni kullanıcı kayıt olurken otomatik oluşturulur (db_manager.kullanici_kayit).

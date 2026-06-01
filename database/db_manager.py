@@ -1,5 +1,8 @@
 """MySQL veritabanı yöneticisi — tüm CRUD operasyonları burada."""
+import hashlib
+import hmac
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -47,6 +50,62 @@ class Database:
         except Error as e:
             logger.error("Veritabanı bağlantı hatası: %s", e)
             raise
+        # Çok kullanıcılı yapıya geçiş — eski şema kalıntılarını idempotent şekilde düzelt.
+        try:
+            self._migrate_schema()
+        except Error as e:
+            logger.warning("Otomatik şema migrasyonu sırasında uyarı: %s", e)
+
+    def _migrate_schema(self) -> None:
+        """Idempotent migrasyon: eksik kolon ekler, eski seed/kullanici_adi temizler, UNIQUE koyar."""
+        sema = self.database
+
+        # 1) sifre_hash kolonu yoksa ekle (önce NULL'a izin ver — mevcut satırlar için)
+        satir = self.fetch_one(
+            "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='Kullanicilar' AND COLUMN_NAME='sifre_hash'",
+            (sema,),
+        )
+        if satir and int(satir.get("c") or 0) == 0:
+            self.execute("ALTER TABLE Kullanicilar ADD COLUMN sifre_hash VARCHAR(255) NULL")
+            logger.info("Şema migrasyonu: 'sifre_hash' kolonu eklendi.")
+
+        # 2) Eski seed kaydı (sifre_hash boş/NULL olan id=1) → sil
+        try:
+            self.execute(
+                "DELETE FROM Kullanicilar WHERE id=1 AND (sifre_hash IS NULL OR sifre_hash='')"
+            )
+        except Error as e:
+            logger.warning("Eski seed kaydı silinemedi: %s", e)
+
+        # 3) Önceki denemeden kalan 'kullanici_adi' kolonu varsa kaldır
+        satir = self.fetch_one(
+            "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='Kullanicilar' AND COLUMN_NAME='kullanici_adi'",
+            (sema,),
+        )
+        if satir and int(satir.get("c") or 0) > 0:
+            try:
+                self.execute("ALTER TABLE Kullanicilar DROP COLUMN kullanici_adi")
+                logger.info("Şema migrasyonu: 'kullanici_adi' kolonu kaldırıldı.")
+            except Error as e:
+                logger.warning("'kullanici_adi' kolonu kaldırılamadı: %s", e)
+
+        # 4) 'ad' kolonu UNIQUE değilse UNIQUE yap (mükerrer kayıt varsa atla)
+        satir = self.fetch_one(
+            "SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME='Kullanicilar' AND COLUMN_NAME='ad' "
+            "AND NON_UNIQUE=0",
+            (sema,),
+        )
+        if satir and int(satir.get("c") or 0) == 0:
+            try:
+                self.execute("ALTER TABLE Kullanicilar ADD UNIQUE KEY uniq_ad (ad)")
+                logger.info("Şema migrasyonu: 'ad' alanına UNIQUE constraint eklendi.")
+            except Error as e:
+                # Mükerrer kayıt varsa burası patlar — uygulama yine çalışır, ama kayıtta
+                # benzersizlik kontrolü uygulama katmanında yapılıyor zaten.
+                logger.warning("'ad' UNIQUE constraint eklenemedi: %s", e)
 
     def disconnect(self) -> None:
         """Açık bağlantıyı kapatır."""
@@ -127,10 +186,84 @@ class Database:
             cursor.close()
 
     # ----- Kullanıcı -----
-    def kullanici_getir(self, kullanici_id: int = 1) -> Optional[User]:
+    _PBKDF2_ITER = 200_000
+    _PBKDF2_ALGO = "sha256"
+
+    @staticmethod
+    def _sifre_hashle(sifre: str) -> str:
+        """PBKDF2-SHA256 ile şifreyi hashler. Format: algo$iter$salt_hex$hash_hex."""
+        salt = os.urandom(16)
+        turetilmis = hashlib.pbkdf2_hmac(
+            Database._PBKDF2_ALGO, sifre.encode("utf-8"), salt, Database._PBKDF2_ITER
+        )
+        return f"pbkdf2_{Database._PBKDF2_ALGO}${Database._PBKDF2_ITER}${salt.hex()}${turetilmis.hex()}"
+
+    @staticmethod
+    def _sifre_dogrula(sifre: str, sifre_hash: str) -> bool:
+        """Verilen düz şifreyi saklı hash ile sabit zamanlı karşılaştırır."""
+        try:
+            algo_etiketi, iter_str, salt_hex, hash_hex = sifre_hash.split("$")
+            if not algo_etiketi.startswith("pbkdf2_"):
+                return False
+            algo = algo_etiketi.split("_", 1)[1]
+            iterasyon = int(iter_str)
+            salt = bytes.fromhex(salt_hex)
+            beklenen = bytes.fromhex(hash_hex)
+        except (ValueError, AttributeError):
+            return False
+        turetilmis = hashlib.pbkdf2_hmac(algo, sifre.encode("utf-8"), salt, iterasyon)
+        return hmac.compare_digest(turetilmis, beklenen)
+
+    def ad_var_mi(self, ad: str) -> bool:
+        """Verilen ad kayıtlı mı?"""
+        satir = self.fetch_one(
+            "SELECT id FROM Kullanicilar WHERE ad = %s",
+            ((ad or "").strip(),),
+        )
+        return satir is not None
+
+    def kullanici_kayit(self, ad: str, sifre: str,
+                        email: Optional[str] = None,
+                        telefon: Optional[str] = None) -> User:
+        """Yeni kullanıcı kaydeder; default bildirim ayarını da otomatik oluşturur."""
+        ad = (ad or "").strip()
+        if not ad or not sifre:
+            raise ValueError("Ad ve şifre boş olamaz.")
+        if self.ad_var_mi(ad):
+            raise ValueError("Bu ad zaten kayıtlı.")
+        sifre_hash = self._sifre_hashle(sifre)
+        yeni_id = self.execute(
+            "INSERT INTO Kullanicilar (ad, sifre_hash, email, telefon) "
+            "VALUES (%s, %s, %s, %s)",
+            (ad, sifre_hash, email, telefon),
+        )
+        # Default bildirim ayarını da ekle (şema seed'i çok kullanıcıda yok)
+        self.execute(
+            "INSERT INTO BildirimAyarlari (kullanici_id) VALUES (%s)",
+            (int(yeni_id),),
+        )
+        kullanici = self.kullanici_getir(int(yeni_id))
+        if kullanici is None:
+            raise RuntimeError("Kullanıcı eklendi ancak geri okunamadı.")
+        return kullanici
+
+    def kullanici_dogrula(self, ad: str, sifre: str) -> Optional[User]:
+        """Ad + şifre eşleşirse User döner, aksi halde None."""
+        satir = self.fetch_one(
+            "SELECT id, sifre_hash, ad, email, telefon, kvkk_onay, kayit_tarihi "
+            "FROM Kullanicilar WHERE ad = %s",
+            ((ad or "").strip(),),
+        )
+        if not satir:
+            return None
+        if not self._sifre_dogrula(sifre, satir.get("sifre_hash") or ""):
+            return None
+        return self._row_to_user(satir)
+
+    def kullanici_getir(self, kullanici_id: int) -> Optional[User]:
         """Kullanıcıyı id ile getirir. Yoksa None."""
         satir = self.fetch_one(
-            "SELECT id, ad, email, telefon, kvkk_onay, kayit_tarihi "
+            "SELECT id, sifre_hash, ad, email, telefon, kvkk_onay, kayit_tarihi "
             "FROM Kullanicilar WHERE id = %s",
             (kullanici_id,),
         )
@@ -400,6 +533,7 @@ class Database:
             telefon=row.get("telefon"),
             kvkk_onay=bool(row.get("kvkk_onay", False)),
             kayit_tarihi=row.get("kayit_tarihi"),
+            sifre_hash=row.get("sifre_hash"),
         )
 
     @staticmethod

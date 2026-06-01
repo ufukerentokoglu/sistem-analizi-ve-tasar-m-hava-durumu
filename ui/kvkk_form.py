@@ -29,41 +29,64 @@ class KVKKForm(tk.Toplevel):
         self.kullanici_id = kullanici_id
         self.onaylandi: bool = False
         self.title("Konum İzni ve KVKK")
-        self.geometry("600x500")
+        self.geometry("620x520")
         self.resizable(False, False)
+        self.configure(bg="white")
+        # Tutarlı render için clam tema (aqua'da tk widgetlarıyla karışım sorunlu)
+        try:
+            ttk.Style(self).theme_use("clam")
+        except tk.TclError:
+            pass
         try:
             self.transient(parent)
+        except tk.TclError:
+            pass
+        self._arayuzu_olustur()
+        self.update_idletasks()
+        self._merkezle(parent)
+        # macOS'ta önceki Toplevel kapanınca yeni Toplevel arkaya düşebiliyor —
+        # öne çek + odakla, sonra topmost'u bırak.
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+            self.attributes("-topmost", True)
+            self.after(200, lambda: self.attributes("-topmost", False))
         except tk.TclError:
             pass
         try:
             self.grab_set()
         except tk.TclError:
             pass
-        self._arayuzu_olustur()
-        self._merkezle(parent)
 
     def _arayuzu_olustur(self) -> None:
+        # 1) Üst başlık şeridi
         ust = tk.Frame(self, bg="#1E88E5", height=60)
-        ust.pack(fill="x")
+        ust.pack(side="top", fill="x")
         ust.pack_propagate(False)
         tk.Label(ust, text="📋 KVKK Aydınlatma Metni",
                  font=("Helvetica", 16, "bold"),
                  fg="white", bg="#1E88E5").pack(pady=15)
 
-        govde = tk.Frame(self, bg="white", padx=20, pady=15)
-        govde.pack(fill="both", expand=True)
-        tk.Label(govde, text=self.KVKK_METNI,
-                 font=("Helvetica", 10),
-                 bg="white", justify="left", anchor="nw"
-                 ).pack(fill="both", expand=True)
+        # 2) Alt buton şeridi — gövdeden ÖNCE pack edilmeli ki yer kapsın
+        alt = tk.Frame(self, bg="white")
+        alt.pack(side="bottom", fill="x", pady=(0, 15), padx=15)
+        ttk.Button(alt, text="Reddet (Konum izni vermeden devam)",
+                   command=self._reddet).pack(side="right", padx=(8, 0))
+        ttk.Button(alt, text="Onaylıyorum",
+                   command=self._onayla).pack(side="right")
+        ttk.Label(alt, text="Reddedersen uygulama açılır ama IP ile konum bulunamaz.",
+                  background="white", foreground="#555",
+                  font=("Helvetica", 9)).pack(side="left")
 
-        # Alt buton şeridi
-        alt = tk.Frame(self)
-        alt.pack(fill="x", pady=(0, 15))
-        ttk.Button(alt, text="Reddet", command=self._reddet).pack(
-            side="right", padx=(0, 20))
-        ttk.Button(alt, text="Onaylıyorum", command=self._onayla).pack(
-            side="right", padx=(0, 10))
+        # 3) Gövde — KVKK metni (ttk.Label ile, fg/bg açıkça)
+        govde = tk.Frame(self, bg="white")
+        govde.pack(side="top", fill="both", expand=True, padx=20, pady=15)
+        tk.Label(govde, text=self.KVKK_METNI,
+                 font=("Helvetica", 11),
+                 fg="black", bg="white",
+                 justify="left", anchor="nw"
+                 ).pack(fill="both", expand=True)
 
     def _onayla(self) -> None:
         """KVKK'yı onayla, DB'ye yaz, dialog'u kapat."""

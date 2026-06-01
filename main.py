@@ -11,6 +11,7 @@ from services.notification_service import NotificationService
 from services.risk_analyzer import RiskAnalyzer
 from services.weather_api import WeatherAPI
 from ui.kvkk_form import KVKKForm
+from ui.login_form import LoginForm
 from ui.main_form import MainForm
 
 
@@ -42,19 +43,36 @@ def main() -> None:
         logger.error("Veritabanına bağlanılamadı: %s", e)
         sys.exit(1)
 
-    # KVKK kontrolü — onaysız uygulama açılmaz
-    user = db.kullanici_getir(1)
-    if user is None or not user.kvkk_onay:
-        import tkinter as tk
-        gecici_kok = tk.Tk()
-        gecici_kok.withdraw()
-        kvkk = KVKKForm(gecici_kok, db)
-        gecici_kok.wait_window(kvkk)
+    # Giriş / kayıt — başarılı kimlik doğrulanmadan uygulama açılmaz
+    import tkinter as tk
+    gecici_kok = tk.Tk()
+    gecici_kok.withdraw()
+    login = LoginForm(gecici_kok, db)
+    gecici_kok.wait_window(login)
+    if login.user is None:
+        logger.info("Giriş yapılmadı; uygulama kapatılıyor.")
         gecici_kok.destroy()
-        if not kvkk.onaylandi:
-            logger.info("KVKK onaylanmadı; uygulama kapatılıyor.")
-            db.disconnect()
-            return
+        db.disconnect()
+        return
+    aktif_user = login.user
+    logger.info("Aktif kullanıcı: %s (id=%s, kvkk_onay=%s)",
+                aktif_user.ad, aktif_user.id, aktif_user.kvkk_onay)
+
+    # KVKK kontrolü — onay yoksa uygulama yine açılır ama konum tespiti devre dışı kalır
+    konum_izni = aktif_user.kvkk_onay
+    if not aktif_user.kvkk_onay:
+        logger.info("KVKK formu açılıyor (kullanici_id=%s)…", aktif_user.id)
+        kvkk = KVKKForm(gecici_kok, db, kullanici_id=aktif_user.id)
+        gecici_kok.wait_window(kvkk)
+        logger.info("KVKK formu kapatıldı (onaylandi=%s).", kvkk.onaylandi)
+        if kvkk.onaylandi:
+            aktif_user.kvkk_onay = True
+            konum_izni = True
+        else:
+            logger.info("KVKK reddedildi; uygulama açılacak ama IP konum tespiti devre dışı.")
+    gecici_kok.destroy()
+    logger.info("MainForm başlatılıyor (kullanici_id=%s, konum_izni=%s)…",
+                aktif_user.id, konum_izni)
 
     # Servisler
     weather_api = WeatherAPI()
@@ -67,7 +85,9 @@ def main() -> None:
     app = MainForm(db, weather_api, location_service,
                    risk_analyzer=risk_analyzer,
                    notification_service=notification_service,
-                   scheduler=scheduler)
+                   scheduler=scheduler,
+                   kullanici_id=aktif_user.id,
+                   konum_izni=konum_izni)
     try:
         app.mainloop()
     finally:
